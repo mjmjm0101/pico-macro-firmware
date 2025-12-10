@@ -154,6 +154,85 @@ bool saveWifiConfig(const WifiConfig &cfg) {
 }
 
 // ==============================
+// Wi-Fi start/stop helpers
+// ==============================
+void stopWifiServer() {
+  Serial.println("[WiFi] Stopping Wi-Fi server...");
+
+  if (gServer) {
+    gServer->stop();
+    delete gServer;
+    gServer = nullptr;
+  }
+
+  WiFi.disconnect(true);  // APから切断 & 保存済み設定も消す
+  WiFi.mode(WIFI_OFF);
+
+  wifiStarted = false;
+
+  Serial.println("[WiFi] Stopped.");
+}
+
+bool startWifiFromConfig() {
+  if (!gWifiConfig.valid) {
+    Serial.println("[WiFi] startWifiFromConfig: config invalid");
+    return false;
+  }
+
+  Serial.println("[WiFi] config found -> attempting to connect");
+  WiFi.mode(WIFI_STA);
+
+  WiFi.config(gWifiConfig.localIP, gWifiConfig.gateway, gWifiConfig.subnet);
+
+  Serial.print("[WiFi] Connecting to SSID: ");
+  Serial.println(gWifiConfig.ssid);
+
+  WiFi.begin(gWifiConfig.ssid.c_str(), gWifiConfig.password.c_str());
+
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print("status = ");
+    Serial.println(WiFi.status());
+    delay(500);
+
+    if (millis() - start > 15000) {
+      Serial.println("[WiFi] TIMEOUT! Could not connect.");
+      break;
+    }
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WiFi] connect failed");
+    wifiStarted = false;
+    return false;
+  }
+
+  // ポート番号を数値に変換（不正 or 0 の場合は 5000 にフォールバック）
+  uint16_t portNum = (uint16_t)gWifiConfig.port.toInt();
+  if (portNum == 0) {
+    portNum = 5000;
+  }
+  gTcpPort = portNum;
+
+  if (gServer) {
+    gServer->stop();
+    delete gServer;
+    gServer = nullptr;
+  }
+  gServer = new WiFiServer(gTcpPort);
+  gServer->begin();
+
+  Serial.println();
+  Serial.print("[WiFi] Connected! IP = ");
+  Serial.print(WiFi.localIP());
+  Serial.print(", Port = ");
+  Serial.println(gTcpPort);
+
+  wifiStarted = true;
+  return true;
+}
+
+// ==============================
 // Serial config protocol
 //
 // CFG BEGIN
@@ -274,23 +353,31 @@ void handleConfigCommand(const String &line) {
     Serial.println("[CFG] RESET command received");
     Serial.println("Booting Pico W Switch Pad (soft reset handler)...");
 
-    if (gWifiConfig.valid) {
-      Serial.println("[WiFi] Current config:");
-      Serial.print("[WiFi] SSID: "); Serial.println(gWifiConfig.ssid);
-      Serial.print("[WiFi] IP  : "); Serial.println(gWifiConfig.localIP);
-      Serial.print("[WiFi] PORT: "); Serial.println(gWifiConfig.port);
-      Serial.print("[WiFi] GW  : "); Serial.println(gWifiConfig.gateway);
-      Serial.print("[WiFi] SN  : "); Serial.println(gWifiConfig.subnet);
-      if (wifiStarted) {
-        Serial.println("[WiFi] State: connected (server should be running)");
-      } else {
-        Serial.println("[WiFi] State: config present but not connected");
-      }
-    } else {
-      Serial.println("[WiFi] State: no config -> offline mode");
+    // --- wifi.cfg を再読み込み ---
+    Serial.println("[CFG] Reloading wifi.cfg...");
+    if (!loadWifiConfig()) {
+      Serial.println("[CFG] Reload failed. Wi-Fi will be stopped.");
+      stopWifiServer();
+      Serial.println("[CFG] RESET handler done (Wi-Fi stopped).");
+      return;
     }
 
-    Serial.println("[CFG] RESET handler done.");
+    // 新しく読み込んだ設定を表示
+    Serial.println("[WiFi] New config (after reload):");
+    Serial.print("[WiFi] SSID: "); Serial.println(gWifiConfig.ssid);
+    Serial.print("[WiFi] IP  : "); Serial.println(gWifiConfig.localIP);
+    Serial.print("[WiFi] PORT: "); Serial.println(gWifiConfig.port);
+    Serial.print("[WiFi] GW  : "); Serial.println(gWifiConfig.gateway);
+    Serial.print("[WiFi] SN  : "); Serial.println(gWifiConfig.subnet);
+
+    // --- Wi-Fi を再接続 ---
+    Serial.println("[CFG] Applying new Wi-Fi config (reconnect)...");
+    stopWifiServer();          // いったんクリーンに落とす
+    if (startWifiFromConfig()) {
+      Serial.println("[CFG] RESET handler done (Wi-Fi reconnected).");
+    } else {
+      Serial.println("[CFG] RESET handler done (Wi-Fi connect failed).");
+    }
     return;
   }
 
@@ -691,54 +778,9 @@ void setup() {
 
   // ---- load /wifi.cfg and connect Wi-Fi if present ----
   if (loadWifiConfig()) {
-    Serial.println("[WiFi] config found -> attempting to connect");
-    WiFi.mode(WIFI_STA);
-
-    WiFi.config(gWifiConfig.localIP, gWifiConfig.gateway, gWifiConfig.subnet);
-
-    Serial.print("[WiFi] Connecting to SSID: ");
-    Serial.println(gWifiConfig.ssid);
-
-    WiFi.begin(gWifiConfig.ssid.c_str(), gWifiConfig.password.c_str());
-
-    uint32_t start = millis();
-    while (WiFi.status() != WL_CONNECTED) {
-      Serial.print("status = ");
-      Serial.println(WiFi.status());
-      delay(500);
-
-      if (millis() - start > 15000) {
-        Serial.println("[WiFi] TIMEOUT! Could not connect.");
-        break;
-      }
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      // ポート番号を数値に変換（不正 or 0 の場合は 5000 にフォールバック）
-      uint16_t portNum = (uint16_t)gWifiConfig.port.toInt();
-      if (portNum == 0) {
-        portNum = 5000;
-      }
-      gTcpPort = portNum;
-
-      // 既存サーバーがあれば破棄して作り直す
-      if (gServer) {
-        delete gServer;
-        gServer = nullptr;
-      }
-      gServer = new WiFiServer(gTcpPort);
-      gServer->begin();
-
-      Serial.println();
-      Serial.print("[WiFi] Connected! IP = ");
-      Serial.print(WiFi.localIP());
-      Serial.print(", Port = ");
-      Serial.println(gTcpPort);
-
-      wifiStarted = true;
-    } else {
+    if (!startWifiFromConfig()) {
       Serial.println("[WiFi] connect failed -> offline mode");
-      wifiStarted = false;
+      // startWifiFromConfig 内で wifiStarted = false になる
     }
   } else {
     Serial.println("[WiFi] no config -> Wi-Fi will not be used");
