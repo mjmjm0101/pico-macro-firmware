@@ -1,0 +1,81 @@
+name: Build & Auto Release Pico W firmware
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history for tags
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install rp2040 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls \
+            https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+          arduino-cli core update-index
+          arduino-cli core install rp2040:rp2040
+
+      - name: Determine next version tag
+        id: version
+        run: |
+          # 最新の vX.Y.Z タグを取得
+          LAST_TAG=$(git tag --sort=-v:refname | grep '^v' | head -n 1 || true)
+          echo "Last tag: $LAST_TAG"
+          if [ -z "$LAST_TAG" ]; then
+            NEXT_TAG="v0.0.1"
+          else
+            BASE=${LAST_TAG#v}
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
+            PATCH=$((PATCH + 1))
+            NEXT_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+          echo "Next tag: $NEXT_TAG"
+          echo "tag=$NEXT_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build firmware (Pico W)
+        run: |
+          arduino-cli compile \
+            --fqbn rp2040:rp2040:rpipicow \
+            --board-options usbstack=tinyusb \
+            firmware/pico_switch_pad
+          UF2=$(find . -name '*.uf2' -print -quit)
+          if [ -z "$UF2" ]; then
+            echo "No UF2 generated"; exit 1
+          fi
+          mv "$UF2" pico-macro-firmware.uf2
+
+      - name: Create and push tag
+        run: |
+          TAG=${{ steps.version.outputs.tag }}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Upload UF2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-macro-firmware
+          path: pico-macro-firmware.uf2
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          files: pico-macro-firmware.uf2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
