@@ -15,7 +15,7 @@ struct WifiConfig {
   String ssid;
   String password;
   IPAddress localIP;
-  String port;      // stringとして保持（ログ・CFG表示用）
+  String port;      // string として保持（ログ・CFG表示用）
   IPAddress gateway;
   IPAddress subnet;
   bool valid;
@@ -104,7 +104,7 @@ bool loadWifiConfig() {
   }
 
   if (port.length() == 0) {
-    // 古いフォーマット互換 or 空なら5000にフォールバック
+    // 古いフォーマット互換 or 空なら 5000 にフォールバック
     port = "5000";
   }
 
@@ -144,7 +144,7 @@ bool saveWifiConfig(const WifiConfig &cfg) {
   f.println(cfg.ssid);
   f.println(cfg.password);
   f.println(cfg.localIP.toString());
-  f.println(cfg.port);                 // ← Stringそのまま
+  f.println(cfg.port);                 // ← String そのまま
   f.println(cfg.gateway.toString());
   f.println(cfg.subnet.toString());
   f.close();
@@ -259,6 +259,25 @@ String serialLine = "";
 // forward
 void handleCommand(const String& rawLine, WiFiClient *client = nullptr);
 
+// シリアル入力をまとめて処理するヘルパ
+void processSerialInput() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      String line = serialLine;
+      line.trim();
+      if (line.length()) {
+        Serial.print("[CFG] line: ");
+        Serial.println(line);
+        handleConfigCommand(line);
+      }
+      serialLine = "";
+    } else if (c != '\r') {
+      serialLine += c;
+    }
+  }
+}
+
 void resetIncomingCfg() {
   incomingCfg.ssid     = "";
   incomingCfg.password = "";
@@ -270,7 +289,7 @@ void resetIncomingCfg() {
 }
 
 void handleConfigCommand(const String &line) {
-  // FW VERSION (Serial経由)
+  // FW VERSION (Serial 経由)
   if (line == "VERSION") {
     Serial.print("[FW] VERSION ");
     Serial.println(FW_VERSION);
@@ -348,7 +367,7 @@ void handleConfigCommand(const String &line) {
     return;
   }
 
-  // ----- pseudo reset command for Serial Monitor -----
+  // ----- RESET : wifi.cfg 再読み込み + Wi-Fi 再接続 -----
   if (line == "RESET") {
     Serial.println("[CFG] RESET command received");
     Serial.println("Booting Pico W Switch Pad (soft reset handler)...");
@@ -362,13 +381,17 @@ void handleConfigCommand(const String &line) {
       return;
     }
 
-    // 新しく読み込んだ設定を表示
-    Serial.println("[WiFi] New config (after reload):");
-    Serial.print("[WiFi] SSID: "); Serial.println(gWifiConfig.ssid);
-    Serial.print("[WiFi] IP  : "); Serial.println(gWifiConfig.localIP);
-    Serial.print("[WiFi] PORT: "); Serial.println(gWifiConfig.port);
-    Serial.print("[WiFi] GW  : "); Serial.println(gWifiConfig.gateway);
-    Serial.print("[WiFi] SN  : "); Serial.println(gWifiConfig.subnet);
+    // 再読み込み済みの設定内容を表示
+    if (gWifiConfig.valid) {
+      Serial.println("[WiFi] Current config (reloaded):");
+      Serial.print("[WiFi] SSID: "); Serial.println(gWifiConfig.ssid);
+      Serial.print("[WiFi] IP  : "); Serial.println(gWifiConfig.localIP);
+      Serial.print("[WiFi] PORT: "); Serial.println(gWifiConfig.port);
+      Serial.print("[WiFi] GW  : "); Serial.println(gWifiConfig.gateway);
+      Serial.print("[WiFi] SN  : "); Serial.println(gWifiConfig.subnet);
+    } else {
+      Serial.println("[WiFi] State: no config -> offline mode");
+    }
 
     // --- Wi-Fi を再接続 ---
     Serial.println("[CFG] Applying new Wi-Fi config (reconnect)...");
@@ -436,7 +459,7 @@ void handleConfigCommand(const String &line) {
   }
 
   if (!cfgReceiving) {
-    // ignore other lines when not in CFG mode
+    // CFG モード外では他の行は無視
     return;
   }
 
@@ -779,32 +802,16 @@ void setup() {
   // ---- load /wifi.cfg and connect Wi-Fi if present ----
   if (loadWifiConfig()) {
     if (!startWifiFromConfig()) {
-      Serial.println("[WiFi] connect failed -> offline mode");
-      // startWifiFromConfig 内で wifiStarted = false になる
+      Serial.println("[WiFi] connect failed at boot -> offline mode");
     }
   } else {
     Serial.println("[WiFi] no config -> Wi-Fi will not be used");
-    wifiStarted = false;
   }
 }
 
 void loop() {
-  // ---- read serial for config commands ----
-  while (Serial.available()) {
-    char c = Serial.read();
-    if (c == '\n') {
-      String line = serialLine;
-      line.trim();
-      if (line.length()) {
-        Serial.print("[CFG] line: ");
-        Serial.println(line);
-        handleConfigCommand(line);
-      }
-      serialLine = "";
-    } else if (c != '\r') {
-      serialLine += c;
-    }
-  }
+  // どの状態でもシリアル入力は常に処理
+  processSerialInput();
 
   if (wifiStarted && gServer) {
     WiFiClient client = gServer->accept();
@@ -814,6 +821,7 @@ void loop() {
 
       String line;
       while (client.connected()) {
+        // --- Wi-Fi クライアントからのコマンド ---
         while (client.available()) {
           char c = client.read();
           if (c == '\n') {
@@ -828,6 +836,9 @@ void loop() {
             line += c;
           }
         }
+
+        // --- クライアント接続中もシリアル入力を処理する ---
+        processSerialInput();
 
         if (Gamepad.ready()) {
           Gamepad.loop();
