@@ -51,6 +51,7 @@ jobs:
           arduino-cli compile \
             --fqbn rp2040:rp2040:rpipicow \
             --board-options usbstack=tinyusb \
+            --libraries ./libraries \
             firmware/pico_switch_pad
           UF2=$(find . -name '*.uf2' -print -quit)
           if [ -z "$UF2" ]; then
