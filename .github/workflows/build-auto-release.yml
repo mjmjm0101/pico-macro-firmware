@@ -45,13 +45,21 @@ jobs:
           fi
           echo "Next tag: $NEXT_TAG"
           echo "tag=$NEXT_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${NEXT_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate version.h
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "#pragma once" > firmware/pico_switch_pad/version.h
+          echo "#define FW_VERSION \"${VERSION}\"" >> firmware/pico_switch_pad/version.h
 
       - name: Build firmware (Pico W)
         run: |
           arduino-cli compile \
             --fqbn rp2040:rp2040:rpipicow \
-            --board-options usbstack=tinyusb \
+            --board-options usbstack=tinyusb,flash=2097152_65536 \
             --libraries ./libraries \
+            --export-binaries \
             firmware/pico_switch_pad
           UF2=$(find . -name '*.uf2' -print -quit)
           if [ -z "$UF2" ]; then

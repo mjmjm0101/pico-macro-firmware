@@ -2,6 +2,11 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include "switch_tinyusb.h"
+#include "version.h"
+
+#ifndef FW_VERSION
+#define FW_VERSION "dev"
+#endif
 
 // ==============================
 // Wi-Fi config struct + globals
@@ -10,14 +15,20 @@ struct WifiConfig {
   String ssid;
   String password;
   IPAddress localIP;
+  String port;      // stringとして保持（ログ・CFG表示用）
   IPAddress gateway;
   IPAddress subnet;
   bool valid;
 };
 
-WifiConfig gWifiConfig = { "", "", IPAddress(), IPAddress(), IPAddress(), false };
+WifiConfig gWifiConfig = { "", "", IPAddress(), "", IPAddress(), IPAddress(), false };
 bool wifiStarted = false;   // whether Wi-Fi server is running
 bool fsMounted   = false;   // LittleFS mounted state
+
+// 動的に選べるようにするため、サーバはポインタで保持
+WiFiServer* gServer = nullptr;
+// 変換後の実際のポート番号（0 の場合は 5000 にフォールバック）
+uint16_t gTcpPort = 5000;
 
 // ==============================
 // FS helper: mount LittleFS
@@ -53,6 +64,13 @@ bool ensureFS() {
 
 // ==============================
 // Load config from /wifi.cfg
+//  フォーマット：
+//    1行目: ssid
+//    2行目: password
+//    3行目: ip
+//    4行目: port
+//    5行目: gateway
+//    6行目: subnet
 // ==============================
 bool loadWifiConfig() {
   if (!ensureFS()) {
@@ -66,11 +84,12 @@ bool loadWifiConfig() {
     return false;
   }
 
-  String ssid = f.readStringUntil('\\n'); ssid.trim();
-  String pass = f.readStringUntil('\\n'); pass.trim();
-  String ip   = f.readStringUntil('\\n'); ip.trim();
-  String gw   = f.readStringUntil('\\n'); gw.trim();
-  String sn   = f.readStringUntil('\\n'); sn.trim();
+  String ssid = f.readStringUntil('\n'); ssid.trim();
+  String pass = f.readStringUntil('\n'); pass.trim();
+  String ip   = f.readStringUntil('\n'); ip.trim();
+  String port = f.readStringUntil('\n'); port.trim();
+  String gw   = f.readStringUntil('\n'); gw.trim();
+  String sn   = f.readStringUntil('\n'); sn.trim();
   f.close();
 
   IPAddress ipAddr, gwAddr, snAddr;
@@ -84,8 +103,14 @@ bool loadWifiConfig() {
     return false;
   }
 
+  if (port.length() == 0) {
+    // 古いフォーマット互換 or 空なら5000にフォールバック
+    port = "5000";
+  }
+
   gWifiConfig.ssid     = ssid;
   gWifiConfig.password = pass;
+  gWifiConfig.port     = port;
   gWifiConfig.localIP  = ipAddr;
   gWifiConfig.gateway  = gwAddr;
   gWifiConfig.subnet   = snAddr;
@@ -94,6 +119,7 @@ bool loadWifiConfig() {
   Serial.println("[CFG] wifi.cfg loaded OK");
   Serial.print("[CFG] SSID: "); Serial.println(gWifiConfig.ssid);
   Serial.print("[CFG] IP  : "); Serial.println(gWifiConfig.localIP);
+  Serial.print("[CFG] PORT: "); Serial.println(gWifiConfig.port);
   Serial.print("[CFG] GW  : "); Serial.println(gWifiConfig.gateway);
   Serial.print("[CFG] SN  : "); Serial.println(gWifiConfig.subnet);
 
@@ -118,6 +144,7 @@ bool saveWifiConfig(const WifiConfig &cfg) {
   f.println(cfg.ssid);
   f.println(cfg.password);
   f.println(cfg.localIP.toString());
+  f.println(cfg.port);                 // ← Stringそのまま
   f.println(cfg.gateway.toString());
   f.println(cfg.subnet.toString());
   f.close();
@@ -133,6 +160,7 @@ bool saveWifiConfig(const WifiConfig &cfg) {
 // ssid=XXXX
 // pass=YYYY
 // ip=192.168.11.190
+// port=5000
 // gw=192.168.11.1
 // sn=255.255.255.0
 // CFG END
@@ -143,21 +171,33 @@ bool saveWifiConfig(const WifiConfig &cfg) {
 //   FS INFO
 //   FS TEST
 //   FS FORMAT
+//   VERSION
 // ==============================
 bool cfgReceiving = false;
 WifiConfig incomingCfg;
 String serialLine = "";
 
+// forward
+void handleCommand(const String& rawLine, WiFiClient *client = nullptr);
+
 void resetIncomingCfg() {
   incomingCfg.ssid     = "";
   incomingCfg.password = "";
   incomingCfg.localIP  = IPAddress();
+  incomingCfg.port     = "";
   incomingCfg.gateway  = IPAddress();
   incomingCfg.subnet   = IPAddress();
   incomingCfg.valid    = false;
 }
 
 void handleConfigCommand(const String &line) {
+  // FW VERSION (Serial経由)
+  if (line == "VERSION") {
+    Serial.print("[FW] VERSION ");
+    Serial.println(FW_VERSION);
+    return;
+  }
+
   // ==============================
   // LittleFS Diagnostic Commands
   // ==============================
@@ -238,6 +278,7 @@ void handleConfigCommand(const String &line) {
       Serial.println("[WiFi] Current config:");
       Serial.print("[WiFi] SSID: "); Serial.println(gWifiConfig.ssid);
       Serial.print("[WiFi] IP  : "); Serial.println(gWifiConfig.localIP);
+      Serial.print("[WiFi] PORT: "); Serial.println(gWifiConfig.port);
       Serial.print("[WiFi] GW  : "); Serial.println(gWifiConfig.gateway);
       Serial.print("[WiFi] SN  : "); Serial.println(gWifiConfig.subnet);
       if (wifiStarted) {
@@ -260,6 +301,7 @@ void handleConfigCommand(const String &line) {
       Serial.print("ssid="); Serial.println(gWifiConfig.ssid);
       Serial.print("pass="); Serial.println(gWifiConfig.password);
       Serial.print("ip=");   Serial.println(gWifiConfig.localIP);
+      Serial.print("port="); Serial.println(gWifiConfig.port);
       Serial.print("gw=");   Serial.println(gWifiConfig.gateway);
       Serial.print("sn=");   Serial.println(gWifiConfig.subnet);
     } else {
@@ -283,6 +325,10 @@ void handleConfigCommand(const String &line) {
 
     if (incomingCfg.ssid.length() == 0) {
       Serial.println("[CFG] INVALID: ssid missing");
+      return;
+    }
+    if (incomingCfg.port.length() == 0) {
+      Serial.println("[CFG] INVALID: port missing");
       return;
     }
     if (incomingCfg.localIP == IPAddress() ||
@@ -343,6 +389,10 @@ void handleConfigCommand(const String &line) {
     } else {
       Serial.print("[CFG] sn parse error: "); Serial.println(v);
     }
+  } else if (line.startsWith("port=")) {
+    incomingCfg.port = line.substring(5);
+    incomingCfg.port.trim();
+    Serial.print("[CFG] port="); Serial.println(incomingCfg.port);
   } else {
     Serial.print("[CFG] unknown line in CFG mode: ");
     Serial.println(line);
@@ -352,9 +402,6 @@ void handleConfigCommand(const String &line) {
 // ==============================
 // Original code from here
 // ==============================
-
-// TCP server (PC → Pico)
-WiFiServer server(5000);
 
 // ==== Switch HID ====
 Adafruit_USBD_HID G_usb_hid;
@@ -375,9 +422,6 @@ uint32_t macroNextTick    = 0;
 
 // When true, macro playback is allowed to send commands even while macroRunning
 bool     internalMacroPlayback = false;
-
-// forward
-void handleCommand(const String& rawLine);
 
 // ---- Stick helpers ----
 void setLeftStick(uint8_t x, uint8_t y) {
@@ -446,7 +490,7 @@ void tickMacro() {
   Serial.println(cmd);
 
   internalMacroPlayback = true;
-  handleCommand(cmd);
+  handleCommand(cmd, nullptr);
   internalMacroPlayback = false;
 
   macroIndex++;
@@ -457,7 +501,7 @@ void tickMacro() {
 }
 
 // ---- Command handler ----
-void handleCommand(const String& rawLine) {
+void handleCommand(const String& rawLine, WiFiClient *client) {
   String line = rawLine;
   line.trim();
   if (!line.length()) return;
@@ -627,6 +671,15 @@ void handleCommand(const String& rawLine) {
   else if (upper == "RSTICK LEFT")   setRightStick(0,128);
   else if (upper == "RSTICK RIGHT")  setRightStick(255,128);
 
+  // VERSION (Wi-Fi & Serial)
+  else if (upper == "VERSION") {
+    Serial.print("[FW] VERSION ");
+    Serial.println(FW_VERSION);
+    if (client && client->connected()) {
+      client->println(FW_VERSION);
+    }
+  }
+
   sendReport();
 }
 
@@ -661,12 +714,27 @@ void setup() {
     }
 
     if (WiFi.status() == WL_CONNECTED) {
+      // ポート番号を数値に変換（不正 or 0 の場合は 5000 にフォールバック）
+      uint16_t portNum = (uint16_t)gWifiConfig.port.toInt();
+      if (portNum == 0) {
+        portNum = 5000;
+      }
+      gTcpPort = portNum;
+
+      // 既存サーバーがあれば破棄して作り直す
+      if (gServer) {
+        delete gServer;
+        gServer = nullptr;
+      }
+      gServer = new WiFiServer(gTcpPort);
+      gServer->begin();
+
       Serial.println();
       Serial.print("[WiFi] Connected! IP = ");
-      Serial.println(WiFi.localIP());
+      Serial.print(WiFi.localIP());
+      Serial.print(", Port = ");
+      Serial.println(gTcpPort);
 
-      server.begin();
-      Serial.println("[WiFi] TCP server started on port 5000");
       wifiStarted = true;
     } else {
       Serial.println("[WiFi] connect failed -> offline mode");
@@ -682,7 +750,7 @@ void loop() {
   // ---- read serial for config commands ----
   while (Serial.available()) {
     char c = Serial.read();
-    if (c == '\\n') {
+    if (c == '\n') {
       String line = serialLine;
       line.trim();
       if (line.length()) {
@@ -691,13 +759,13 @@ void loop() {
         handleConfigCommand(line);
       }
       serialLine = "";
-    } else if (c != '\\r') {
+    } else if (c != '\r') {
       serialLine += c;
     }
   }
 
-  if (wifiStarted) {
-    WiFiClient client = server.accept();
+  if (wifiStarted && gServer) {
+    WiFiClient client = gServer->accept();
 
     if (client) {
       Serial.println("[WiFi] Client connected");
@@ -706,15 +774,15 @@ void loop() {
       while (client.connected()) {
         while (client.available()) {
           char c = client.read();
-          if (c == '\\n') {
+          if (c == '\n') {
             line.trim();
             if (line.length()) {
               Serial.print("CMD: ");
               Serial.println(line);
-              handleCommand(line);
+              handleCommand(line, &client);
             }
             line = "";
-          } else if (c != '\\r') {
+          } else if (c != '\r') {
             line += c;
           }
         }
@@ -771,3 +839,4 @@ void loop() {
     }
   }
 }
+
