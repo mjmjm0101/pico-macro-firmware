@@ -812,41 +812,46 @@ void handleCommand(const String& rawLine, WiFiClient *client) {
 void processWifiClientTask() {
   if (!wifiStarted || !gServer) return;
 
-  // ★ まず「切断済みかどうか」をチェックしてログを出す
-  if (gCurrentClient && !gCurrentClient.connected()) {
-    Serial.println("[WiFi] Client disconnected");
-    gCurrentClient.stop();
-    gWifiLineBuffer = "";
-  }
-
-  // ★ まだクライアントがいなければ accept を試す
-  if (!gCurrentClient || !gCurrentClient.connected()) {
-    WiFiClient newClient = gServer->accept();
-    if (newClient) {
-      gCurrentClient = newClient;
-      gWifiLineBuffer = "";
-      Serial.println("[WiFi] Client connected");
-    }
-    // ここでいったん return して OK（新規接続があった場合も、次の loop から処理）
-    return;
-  }
-
-  // ★ ここから下は「接続済みのクライアントがいる」場合の読み取り
-  while (gCurrentClient.available()) {
-    char c = gCurrentClient.read();
-    if (c == '\n') {
-      String line = gWifiLineBuffer;
-      line.trim();
-      if (line.length()) {
-        Serial.print("CMD: ");
-        Serial.println(line);
-        handleCommand(line, &gCurrentClient);
+  // すでにクライアントがいる場合はまず I/O を処理
+  if (gCurrentClient.connected()) {
+    // ★ ここで受信データをすべて処理
+    while (gCurrentClient.available()) {
+      char c = gCurrentClient.read();
+      if (c == '\n') {
+        String line = gWifiLineBuffer;
+        line.trim();
+        if (line.length()) {
+          Serial.print("CMD: ");
+          Serial.println(line);
+          handleCommand(line, &gCurrentClient);
+        }
+        gWifiLineBuffer = "";
+      } else if (c != '\r') {
+        gWifiLineBuffer += c;
       }
-      gWifiLineBuffer = "";
-    } else if (c != '\r') {
-      gWifiLineBuffer += c;
+      yield();
     }
-    yield();
+
+    // ★ データ処理が終わったあとに「まだ接続されてるか」をチェック
+    //   rp2040 の WiFiClient は、available() を一度通したあとで
+    //   connected() が false になるパターンがあるので、
+    //   ここで切断を判定する
+    if (!gCurrentClient.connected()) {
+      Serial.println("[WiFi] Client disconnected");
+      gCurrentClient.stop();
+      gWifiLineBuffer = "";
+    }
+
+    return;  // このループでは新規 accept はしない
+  }
+
+  // ここに来るのは「クライアントが無い or さっき切断された」状態
+  // 新しいクライアントを受け付ける
+  WiFiClient newClient = gServer->accept();
+  if (newClient) {
+    gCurrentClient = newClient;
+    gWifiLineBuffer = "";
+    Serial.println("[WiFi] Client connected");
   }
 }
 
