@@ -812,40 +812,41 @@ void handleCommand(const String& rawLine, WiFiClient *client) {
 void processWifiClientTask() {
   if (!wifiStarted || !gServer) return;
 
-  // 既存クライアントがいなければ accept してみる
-  if (!gCurrentClient || !gCurrentClient.connected()) {
-    if (gCurrentClient) {
-      gCurrentClient.stop();
-      gWifiLineBuffer = "";
-      Serial.println("[WiFi] Client disconnected");
-    }
+  // ★ まず「切断済みかどうか」をチェックしてログを出す
+  if (gCurrentClient && !gCurrentClient.connected()) {
+    Serial.println("[WiFi] Client disconnected");
+    gCurrentClient.stop();
+    gWifiLineBuffer = "";
+  }
 
+  // ★ まだクライアントがいなければ accept を試す
+  if (!gCurrentClient || !gCurrentClient.connected()) {
     WiFiClient newClient = gServer->accept();
     if (newClient) {
       gCurrentClient = newClient;
       gWifiLineBuffer = "";
       Serial.println("[WiFi] Client connected");
     }
+    // ここでいったん return して OK（新規接続があった場合も、次の loop から処理）
+    return;
   }
 
-  // 接続中クライアントがいれば、available の範囲でだけ読む
-  if (gCurrentClient && gCurrentClient.connected()) {
-    while (gCurrentClient.available()) {
-      char c = gCurrentClient.read();
-      if (c == '\n') {
-        String line = gWifiLineBuffer;
-        line.trim();
-        if (line.length()) {
-          Serial.print("CMD: ");
-          Serial.println(line);
-          handleCommand(line, &gCurrentClient);
-        }
-        gWifiLineBuffer = "";
-      } else if (c != '\r') {
-        gWifiLineBuffer += c;
+  // ★ ここから下は「接続済みのクライアントがいる」場合の読み取り
+  while (gCurrentClient.available()) {
+    char c = gCurrentClient.read();
+    if (c == '\n') {
+      String line = gWifiLineBuffer;
+      line.trim();
+      if (line.length()) {
+        Serial.print("CMD: ");
+        Serial.println(line);
+        handleCommand(line, &gCurrentClient);
       }
-      yield();   // ★ Wi-Fi受信ループ内でも譲る
+      gWifiLineBuffer = "";
+    } else if (c != '\r') {
+      gWifiLineBuffer += c;
     }
+    yield();
   }
 }
 
