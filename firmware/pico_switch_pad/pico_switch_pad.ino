@@ -30,6 +30,10 @@ WiFiServer* gServer = nullptr;
 // 変換後の実際のポート番号（0 の場合は 5000 にフォールバック）
 uint16_t gTcpPort = 5000;
 
+// Wi-Fi クライアントをタスク的に扱うためのグローバル
+WiFiClient gCurrentClient;
+String     gWifiLineBuffer = "";
+
 // ==============================
 // FS helper: mount LittleFS
 // ==============================
@@ -165,6 +169,11 @@ void stopWifiServer() {
     gServer = nullptr;
   }
 
+  if (gCurrentClient) {
+    gCurrentClient.stop();
+  }
+  gWifiLineBuffer = "";
+
   WiFi.disconnect(true);  // APから切断 & 保存済み設定も消す
   WiFi.mode(WIFI_OFF);
 
@@ -193,7 +202,8 @@ bool startWifiFromConfig() {
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print("status = ");
     Serial.println(WiFi.status());
-    delay(500);
+    delay(200);
+    yield();     // ★ ここでも他処理にCPUを譲る
 
     if (millis() - start > 15000) {
       Serial.println("[WiFi] TIMEOUT! Could not connect.");
@@ -258,8 +268,9 @@ String serialLine = "";
 
 // forward
 void handleCommand(const String& rawLine, WiFiClient *client = nullptr);
+void handleConfigCommand(const String &line);
 
-// シリアル入力をまとめて処理するヘルパ
+// シリアル入力をまとめて処理するヘルパ (Serial Task)
 void processSerialInput() {
   while (Serial.available()) {
     char c = Serial.read();
@@ -275,6 +286,7 @@ void processSerialInput() {
     } else if (c != '\r') {
       serialLine += c;
     }
+    yield();    // ★ シリアル読み取りループでも譲る
   }
 }
 
@@ -793,6 +805,72 @@ void handleCommand(const String& rawLine, WiFiClient *client) {
   sendReport();
 }
 
+// ==============================
+// Wi-Fi task (non-blocking)
+// ==============================
+void processWifiClientTask() {
+  if (!wifiStarted || !gServer) return;
+
+  // 既存クライアントがいなければ accept してみる
+  if (!gCurrentClient || !gCurrentClient.connected()) {
+    if (gCurrentClient) {
+      gCurrentClient.stop();
+      gWifiLineBuffer = "";
+      Serial.println("[WiFi] Client disconnected");
+    }
+
+    WiFiClient newClient = gServer->accept();
+    if (newClient) {
+      gCurrentClient = newClient;
+      gWifiLineBuffer = "";
+      Serial.println("[WiFi] Client connected");
+    }
+  }
+
+  // 接続中クライアントがいれば、available の範囲でだけ読む
+  if (gCurrentClient && gCurrentClient.connected()) {
+    while (gCurrentClient.available()) {
+      char c = gCurrentClient.read();
+      if (c == '\n') {
+        String line = gWifiLineBuffer;
+        line.trim();
+        if (line.length()) {
+          Serial.print("CMD: ");
+          Serial.println(line);
+          handleCommand(line, &gCurrentClient);
+        }
+        gWifiLineBuffer = "";
+      } else if (c != '\r') {
+        gWifiLineBuffer += c;
+      }
+      yield();   // ★ Wi-Fi受信ループ内でも譲る
+    }
+  }
+}
+
+// ==============================
+// HID & Macro Task
+// ==============================
+void processHidAndMacroTask() {
+  if (Gamepad.ready()) {
+    Gamepad.loop();
+  }
+
+  tickMacro();
+
+  if (macroRunning && !USBDevice.mounted()) {
+    clearMacro();
+    Gamepad.releaseAll();
+    dpadCenter();
+    centerSticks();
+    sendReport();
+    Serial.println("[MACRO] stopped due to USB disconnect");
+  }
+}
+
+// ==============================
+// setup / loop
+// ==============================
 void setup() {
   Serial.begin(115200);
   Gamepad.begin();
@@ -810,86 +888,12 @@ void setup() {
 }
 
 void loop() {
-  // どの状態でもシリアル入力は常に処理
-  processSerialInput();
+  // Task-style cooperative loop
+  processSerialInput();        // Serial 設定コマンド等
+  processWifiClientTask();     // Wi-Fi クライアント I/O
+  processHidAndMacroTask();    // Gamepad / Macro
 
-  if (wifiStarted && gServer) {
-    WiFiClient client = gServer->accept();
-
-    if (client) {
-      Serial.println("[WiFi] Client connected");
-
-      String line;
-      while (client.connected()) {
-        // --- Wi-Fi クライアントからのコマンド ---
-        while (client.available()) {
-          char c = client.read();
-          if (c == '\n') {
-            line.trim();
-            if (line.length()) {
-              Serial.print("CMD: ");
-              Serial.println(line);
-              handleCommand(line, &client);
-            }
-            line = "";
-          } else if (c != '\r') {
-            line += c;
-          }
-        }
-
-        // --- クライアント接続中もシリアル入力を処理する ---
-        processSerialInput();
-
-        if (Gamepad.ready()) {
-          Gamepad.loop();
-        }
-
-        tickMacro();
-
-        if (macroRunning && !USBDevice.mounted()) {
-          clearMacro();
-          Gamepad.releaseAll();
-          dpadCenter();
-          centerSticks();
-          sendReport();
-          Serial.println("[MACRO] stopped due to USB disconnect");
-        }
-      }
-
-      client.stop();
-      Serial.println("[WiFi] Client disconnected");
-    } else {
-      if (Gamepad.ready()) {
-        Gamepad.loop();
-      }
-
-      tickMacro();
-
-      if (macroRunning && !USBDevice.mounted()) {
-        clearMacro();
-        Gamepad.releaseAll();
-        dpadCenter();
-        centerSticks();
-        sendReport();
-        Serial.println("[MACRO] stopped due to USB disconnect (no client)");
-      }
-    }
-  } else {
-    // ---- Wi-Fi offline mode ----
-    if (Gamepad.ready()) {
-      Gamepad.loop();
-    }
-
-    tickMacro();
-
-    if (macroRunning && !USBDevice.mounted()) {
-      clearMacro();
-      Gamepad.releaseAll();
-      dpadCenter();
-      centerSticks();
-      sendReport();
-      Serial.println("[MACRO] stopped due to USB disconnect (offline)");
-    }
-  }
+  yield();     // ★ 協調マルチタスク的お作法
+  delay(0);    // ★ 他タスクやWiFi処理にCPUを渡す
 }
 
