@@ -40,7 +40,7 @@ String     gWifiLineBuffer = "";
 bool ensureFS() {
   if (fsMounted) return true;
 
-  // Try normal mount first
+  // 通常マウントをまず試す
   if (LittleFS.begin()) {
     Serial.println("[FS] LittleFS mounted");
     fsMounted = true;
@@ -49,13 +49,13 @@ bool ensureFS() {
 
   Serial.println("[FS] LittleFS mount failed, trying format...");
 
-  // Try format
+  // フォーマットを試す
   if (!LittleFS.format()) {
     Serial.println("[FS] LittleFS format failed");
     return false;
   }
 
-  // Mount again after format
+  // フォーマット後に再マウント
   if (!LittleFS.begin()) {
     Serial.println("[FS] LittleFS mount after format failed");
     return false;
@@ -255,7 +255,7 @@ bool startWifiFromConfig() {
 // CFG END
 //
 // Extra:
-//   RESET
+//   RESET      (wifi.cfg 再読込 & Wi-Fi 再接続)
 //   CFG GET
 //   FS INFO
 //   FS TEST
@@ -461,7 +461,8 @@ void handleConfigCommand(const String &line) {
     }
 
     if (saveWifiConfig(incomingCfg)) {
-      Serial.println("[CFG] SAVED. Reboot to use this Wi-Fi config.");
+      // RESET コマンドで即反映できるようになったので文言を更新
+      Serial.println("[CFG] SAVED. Send RESET or reboot to apply this Wi-Fi config.");
       gWifiConfig = incomingCfg;
       gWifiConfig.valid = true;
     } else {
