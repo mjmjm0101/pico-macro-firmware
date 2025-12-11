@@ -15,22 +15,19 @@ struct WifiConfig {
   String ssid;
   String password;
   IPAddress localIP;
-  String port;      // string として保持（ログ・CFG表示用）
+  String port;
   IPAddress gateway;
   IPAddress subnet;
   bool valid;
 };
 
 WifiConfig gWifiConfig = { "", "", IPAddress(), "", IPAddress(), IPAddress(), false };
-bool wifiStarted = false;   // whether Wi-Fi server is running
-bool fsMounted   = false;   // LittleFS mounted state
+bool wifiStarted = false;
+bool fsMounted   = false;
 
-// 動的に選べるようにするため、サーバはポインタで保持
 WiFiServer* gServer = nullptr;
-// 変換後の実際のポート番号（0 の場合は 5000 にフォールバック）
-uint16_t gTcpPort = 5000;
+uint16_t gTcpPort   = 5000;
 
-// Wi-Fi クライアントをタスク的に扱うためのグローバル
 WiFiClient gCurrentClient;
 String     gWifiLineBuffer = "";
 
@@ -40,41 +37,46 @@ String     gWifiLineBuffer = "";
 bool ensureFS() {
   if (fsMounted) return true;
 
-  // 通常マウントをまず試す
   if (LittleFS.begin()) {
     Serial.println("[FS] LittleFS mounted");
     fsMounted = true;
     return true;
   }
 
-  Serial.println("[FS] LittleFS mount failed, trying format...");
+  Serial.println("[FS] LittleFS mount failed, retrying once...");
+  delay(50);
 
-  // フォーマットを試す
+  if (LittleFS.begin()) {
+    Serial.println("[FS] LittleFS mounted on second try");
+    fsMounted = true;
+    return true;
+  }
+
+  Serial.println("[FS] still failed, trying format...");
+
   if (!LittleFS.format()) {
-    Serial.println("[FS] LittleFS format failed");
+    Serial.println("[FS] format failed");
     return false;
   }
 
-  // フォーマット後に再マウント
   if (!LittleFS.begin()) {
-    Serial.println("[FS] LittleFS mount after format failed");
+    Serial.println("[FS] mount after format failed");
     return false;
   }
 
-  Serial.println("[FS] LittleFS formatted and mounted");
+  Serial.println("[FS] formatted and mounted");
   fsMounted = true;
   return true;
 }
 
 // ==============================
 // Load config from /wifi.cfg
-//  フォーマット：
-//    1行目: ssid
-//    2行目: password
-//    3行目: ip
-//    4行目: port
-//    5行目: gateway
-//    6行目: subnet
+//   1: ssid
+//   2: password
+//   3: ip
+//   4: port
+//   5: gateway
+//   6: subnet
 // ==============================
 bool loadWifiConfig() {
   if (!ensureFS()) {
@@ -108,7 +110,6 @@ bool loadWifiConfig() {
   }
 
   if (port.length() == 0) {
-    // 古いフォーマット互換 or 空なら 5000 にフォールバック
     port = "5000";
   }
 
@@ -148,7 +149,7 @@ bool saveWifiConfig(const WifiConfig &cfg) {
   f.println(cfg.ssid);
   f.println(cfg.password);
   f.println(cfg.localIP.toString());
-  f.println(cfg.port);                 // ← String そのまま
+  f.println(cfg.port);
   f.println(cfg.gateway.toString());
   f.println(cfg.subnet.toString());
   f.close();
@@ -174,7 +175,7 @@ void stopWifiServer() {
   }
   gWifiLineBuffer = "";
 
-  WiFi.disconnect(true);  // APから切断 & 保存済み設定も消す
+  WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
 
   wifiStarted = false;
@@ -190,7 +191,6 @@ bool startWifiFromConfig() {
 
   Serial.println("[WiFi] config found -> attempting to connect");
   WiFi.mode(WIFI_STA);
-
   WiFi.config(gWifiConfig.localIP, gWifiConfig.gateway, gWifiConfig.subnet);
 
   Serial.print("[WiFi] Connecting to SSID: ");
@@ -203,7 +203,7 @@ bool startWifiFromConfig() {
     Serial.print("status = ");
     Serial.println(WiFi.status());
     delay(200);
-    yield();     // ★ ここでも他処理にCPUを譲る
+    yield();
 
     if (millis() - start > 15000) {
       Serial.println("[WiFi] TIMEOUT! Could not connect.");
@@ -217,7 +217,6 @@ bool startWifiFromConfig() {
     return false;
   }
 
-  // ポート番号を数値に変換（不正 or 0 の場合は 5000 にフォールバック）
   uint16_t portNum = (uint16_t)gWifiConfig.port.toInt();
   if (portNum == 0) {
     portNum = 5000;
@@ -229,6 +228,7 @@ bool startWifiFromConfig() {
     delete gServer;
     gServer = nullptr;
   }
+
   gServer = new WiFiServer(gTcpPort);
   gServer->begin();
 
@@ -244,23 +244,6 @@ bool startWifiFromConfig() {
 
 // ==============================
 // Serial config protocol
-//
-// CFG BEGIN
-// ssid=XXXX
-// pass=YYYY
-// ip=192.168.11.190
-// port=5000
-// gw=192.168.11.1
-// sn=255.255.255.0
-// CFG END
-//
-// Extra:
-//   RESET      (wifi.cfg 再読込 & Wi-Fi 再接続)
-//   CFG GET
-//   FS INFO
-//   FS TEST
-//   FS FORMAT
-//   VERSION
 // ==============================
 bool cfgReceiving = false;
 WifiConfig incomingCfg;
@@ -270,7 +253,9 @@ String serialLine = "";
 void handleCommand(const String& rawLine, WiFiClient *client = nullptr);
 void handleConfigCommand(const String &line);
 
-// シリアル入力をまとめて処理するヘルパ (Serial Task)
+// ==============================
+// Serial input task
+// ==============================
 void processSerialInput() {
   while (Serial.available()) {
     char c = Serial.read();
@@ -286,7 +271,7 @@ void processSerialInput() {
     } else if (c != '\r') {
       serialLine += c;
     }
-    yield();    // ★ シリアル読み取りループでも譲る
+    yield();
   }
 }
 
@@ -301,18 +286,13 @@ void resetIncomingCfg() {
 }
 
 void handleConfigCommand(const String &line) {
-  // FW VERSION (Serial 経由)
   if (line == "VERSION") {
     Serial.print("[FW] VERSION ");
     Serial.println(FW_VERSION);
     return;
   }
 
-  // ==============================
-  // LittleFS Diagnostic Commands
-  // ==============================
-
-  // FS FORMAT -> force format and remount
+  // ---- FS commands ----
   if (line == "FS FORMAT") {
     Serial.println("[FS] FORMAT requested...");
     LittleFS.end();
@@ -331,7 +311,6 @@ void handleConfigCommand(const String &line) {
     return;
   }
 
-  // FS INFO -> show FS status and wifi.cfg existence
   if (line == "FS INFO") {
     Serial.println("[FS] INFO requested");
     if (!ensureFS()) {
@@ -348,7 +327,6 @@ void handleConfigCommand(const String &line) {
     return;
   }
 
-  // FS TEST -> simple read/write test
   if (line == "FS TEST") {
     Serial.println("[FS] TEST begin");
     if (!ensureFS()) {
@@ -356,7 +334,6 @@ void handleConfigCommand(const String &line) {
       return;
     }
 
-    // write test
     File test = LittleFS.open("/test.txt","w");
     if (!test) {
       Serial.println("[FS] open(write) failed");
@@ -365,7 +342,6 @@ void handleConfigCommand(const String &line) {
     test.println("OK");
     test.close();
 
-    // read test
     File read = LittleFS.open("/test.txt","r");
     if (!read) {
       Serial.println("[FS] open(read) failed");
@@ -379,13 +355,12 @@ void handleConfigCommand(const String &line) {
     return;
   }
 
-  // ----- RESET : wifi.cfg 再読み込み + Wi-Fi 再接続 -----
+  // ---- RESET: reload wifi.cfg & reconnect Wi-Fi ----
   if (line == "RESET") {
     Serial.println("[CFG] RESET command received");
     Serial.println("Booting Pico W Switch Pad (soft reset handler)...");
-
-    // --- wifi.cfg を再読み込み ---
     Serial.println("[CFG] Reloading wifi.cfg...");
+
     if (!loadWifiConfig()) {
       Serial.println("[CFG] Reload failed. Wi-Fi will be stopped.");
       stopWifiServer();
@@ -393,7 +368,6 @@ void handleConfigCommand(const String &line) {
       return;
     }
 
-    // 再読み込み済みの設定内容を表示
     if (gWifiConfig.valid) {
       Serial.println("[WiFi] Current config (reloaded):");
       Serial.print("[WiFi] SSID: "); Serial.println(gWifiConfig.ssid);
@@ -405,9 +379,8 @@ void handleConfigCommand(const String &line) {
       Serial.println("[WiFi] State: no config -> offline mode");
     }
 
-    // --- Wi-Fi を再接続 ---
     Serial.println("[CFG] Applying new Wi-Fi config (reconnect)...");
-    stopWifiServer();          // いったんクリーンに落とす
+    stopWifiServer();
     if (startWifiFromConfig()) {
       Serial.println("[CFG] RESET handler done (Wi-Fi reconnected).");
     } else {
@@ -416,7 +389,7 @@ void handleConfigCommand(const String &line) {
     return;
   }
 
-  // ----- return current config -----
+  // ---- return current config ----
   if (line == "CFG GET") {
     Serial.println("[CFG] CURRENT");
     if (gWifiConfig.valid) {
@@ -433,7 +406,7 @@ void handleConfigCommand(const String &line) {
     return;
   }
 
-  // ----- start receiving config -----
+  // ---- CFG begin / end ----
   if (line == "CFG BEGIN") {
     cfgReceiving = true;
     resetIncomingCfg();
@@ -441,7 +414,6 @@ void handleConfigCommand(const String &line) {
     return;
   }
 
-  // ----- end of config, validate and save -----
   if (line == "CFG END") {
     cfgReceiving = false;
 
@@ -461,7 +433,6 @@ void handleConfigCommand(const String &line) {
     }
 
     if (saveWifiConfig(incomingCfg)) {
-      // RESET コマンドで即反映できるようになったので文言を更新
       Serial.println("[CFG] SAVED. Send RESET or reboot to apply this Wi-Fi config.");
       gWifiConfig = incomingCfg;
       gWifiConfig.valid = true;
@@ -472,11 +443,10 @@ void handleConfigCommand(const String &line) {
   }
 
   if (!cfgReceiving) {
-    // CFG モード外では他の行は無視
     return;
   }
 
-  // ----- parse key=value lines while in CFG mode -----
+  // ---- parse key=value lines while in CFG mode ----
   if (line.startsWith("ssid=")) {
     incomingCfg.ssid = line.substring(5);
     incomingCfg.ssid.trim();
@@ -523,17 +493,16 @@ void handleConfigCommand(const String &line) {
 }
 
 // ==============================
-// Original code from here
+// Switch HID / Macro
 // ==============================
-
-// ==== Switch HID ====
 Adafruit_USBD_HID G_usb_hid;
 NSGamepad Gamepad(&G_usb_hid);
 
-// ==== Macro buffer ====
-const int MACRO_MAX_STEPS = 64;
+// 1800ステップ & 1行最大24文字（終端含め25バイト）
+const int    MACRO_MAX_STEPS    = 1800;
+const size_t MACRO_LINE_MAXLEN  = 24;
 
-String   macroLines[MACRO_MAX_STEPS];
+char     macroLines[MACRO_MAX_STEPS][MACRO_LINE_MAXLEN + 1];
 int      macroLength      = 0;
 bool     macroLoaded      = false;
 bool     macroLoading     = false;
@@ -543,7 +512,6 @@ uint32_t macroIntervalMs  = 100;
 int      macroIndex       = 0;
 uint32_t macroNextTick    = 0;
 
-// When true, macro playback is allowed to send commands even while macroRunning
 bool     internalMacroPlayback = false;
 
 // ---- Stick helpers ----
@@ -551,6 +519,7 @@ void setLeftStick(uint8_t x, uint8_t y) {
   Gamepad.leftXAxis(x);
   Gamepad.leftYAxis(y);
 }
+
 void setRightStick(uint8_t x, uint8_t y) {
   Gamepad.rightXAxis(x);
   Gamepad.rightYAxis(y);
@@ -575,6 +544,9 @@ void clearMacro() {
   macroLoaded   = false;
   macroLength   = 0;
   macroIndex    = 0;
+  if (MACRO_MAX_STEPS > 0) {
+    macroLines[0][0] = '\0';
+  }
 }
 
 // ---- Macro tick ----
@@ -585,7 +557,11 @@ void tickMacro() {
   uint32_t now = millis();
   if ((int32_t)(now - macroNextTick) < 0) return;
 
-  String cmd = macroLines[macroIndex];
+  // 固定長バッファから取り出す
+  char* raw = macroLines[macroIndex];
+
+  // ここだけ一時的に String 化して、既存ロジックをほぼそのまま使う
+  String cmd = String(raw);
   String u   = cmd;
   u.trim();
   u.toUpperCase();
@@ -632,7 +608,7 @@ void handleCommand(const String& rawLine, WiFiClient *client) {
   String upper = line;
   upper.toUpperCase();
 
-  // --- MACRO STOP ---
+  // MACRO STOP
   if (upper == "MACRO STOP") {
     clearMacro();
 
@@ -652,7 +628,7 @@ void handleCommand(const String& rawLine, WiFiClient *client) {
     return;
   }
 
-  // --- Macro control ---
+  // Macro control
   if (upper.startsWith("MACRO LOAD ")) {
     int s = upper.lastIndexOf(' ');
     int iv = upper.substring(s + 1).toInt();
@@ -690,11 +666,20 @@ void handleCommand(const String& rawLine, WiFiClient *client) {
 
   if (macroLoading) {
     if (macroLength < MACRO_MAX_STEPS) {
-      macroLines[macroLength++] = line;
+      // ここで line（すでに trim 済み）を固定長バッファへコピー
+      line.toCharArray(macroLines[macroLength], MACRO_LINE_MAXLEN + 1);
+
+      macroLength++;
+
       Serial.print("[MACRO] step ");
       Serial.print(macroLength);
       Serial.print(": ");
       Serial.println(line);
+
+      // （必要ならオーバー長を検出して警告出すこともできる）
+      if (line.length() > MACRO_LINE_MAXLEN) {
+        Serial.println("[MACRO] WARNING: line truncated");
+      }
     } else {
       Serial.println("[MACRO] buffer full, ignoring extra steps");
     }
@@ -759,6 +744,19 @@ void handleCommand(const String& rawLine, WiFiClient *client) {
   else if (upper == "DPAD DOWNLEFT")    Gamepad.dPad(NSGAMEPAD_DPAD_DOWN_LEFT);
   else if (upper == "DPAD DOWNRIGHT")   Gamepad.dPad(NSGAMEPAD_DPAD_DOWN_RIGHT);
 
+  // Stick presets
+  else if (upper == "LSTICK CENTER") setLeftStick(128,128);
+  else if (upper == "LSTICK UP")     setLeftStick(128,0);
+  else if (upper == "LSTICK DOWN")   setLeftStick(128,255);
+  else if (upper == "LSTICK LEFT")   setLeftStick(0,128);
+  else if (upper == "LSTICK RIGHT")  setLeftStick(255,128);
+
+  else if (upper == "RSTICK CENTER") setRightStick(128,128);
+  else if (upper == "RSTICK UP")     setRightStick(128,0);
+  else if (upper == "RSTICK DOWN")   setRightStick(128,255);
+  else if (upper == "RSTICK LEFT")   setRightStick(0,128);
+  else if (upper == "RSTICK RIGHT")  setRightStick(255,128);
+
   // Left stick numeric
   else if (upper.startsWith("LSTICK ")) {
     int s1 = line.indexOf(' ');
@@ -781,19 +779,6 @@ void handleCommand(const String& rawLine, WiFiClient *client) {
     }
   }
 
-  // Stick presets
-  else if (upper == "LSTICK CENTER") setLeftStick(128,128);
-  else if (upper == "LSTICK UP")     setLeftStick(128,0);
-  else if (upper == "LSTICK DOWN")   setLeftStick(128,255);
-  else if (upper == "LSTICK LEFT")   setLeftStick(0,128);
-  else if (upper == "LSTICK RIGHT")  setLeftStick(255,128);
-
-  else if (upper == "RSTICK CENTER") setRightStick(128,128);
-  else if (upper == "RSTICK UP")     setRightStick(128,0);
-  else if (upper == "RSTICK DOWN")   setRightStick(128,255);
-  else if (upper == "RSTICK LEFT")   setRightStick(0,128);
-  else if (upper == "RSTICK RIGHT")  setRightStick(255,128);
-
   // VERSION (Wi-Fi & Serial)
   else if (upper == "VERSION") {
     Serial.print("[FW] VERSION ");
@@ -812,9 +797,25 @@ void handleCommand(const String& rawLine, WiFiClient *client) {
 void processWifiClientTask() {
   if (!wifiStarted || !gServer) return;
 
-  // すでにクライアントがいる場合はまず I/O を処理
-  if (gCurrentClient.connected()) {
-    // ★ ここで受信データをすべて処理
+  // 前回のクライアント切断チェック
+  if (gCurrentClient && !gCurrentClient.connected()) {
+    Serial.println("[WiFi] Client disconnected");
+    gCurrentClient.stop();
+    gWifiLineBuffer = "";
+  }
+
+  // クライアントがいなければ accept
+  if (!gCurrentClient || !gCurrentClient.connected()) {
+    WiFiClient newClient = gServer->accept();
+    if (newClient) {
+      gCurrentClient = newClient;
+      gWifiLineBuffer = "";
+      Serial.println("[WiFi] Client connected");
+    }
+  }
+
+  // 接続済みなら I/O 処理
+  if (gCurrentClient && gCurrentClient.connected()) {
     while (gCurrentClient.available()) {
       char c = gCurrentClient.read();
       if (c == '\n') {
@@ -831,27 +832,6 @@ void processWifiClientTask() {
       }
       yield();
     }
-
-    // ★ データ処理が終わったあとに「まだ接続されてるか」をチェック
-    //   rp2040 の WiFiClient は、available() を一度通したあとで
-    //   connected() が false になるパターンがあるので、
-    //   ここで切断を判定する
-    if (!gCurrentClient.connected()) {
-      Serial.println("[WiFi] Client disconnected");
-      gCurrentClient.stop();
-      gWifiLineBuffer = "";
-    }
-
-    return;  // このループでは新規 accept はしない
-  }
-
-  // ここに来るのは「クライアントが無い or さっき切断された」状態
-  // 新しいクライアントを受け付ける
-  WiFiClient newClient = gServer->accept();
-  if (newClient) {
-    gCurrentClient = newClient;
-    gWifiLineBuffer = "";
-    Serial.println("[WiFi] Client connected");
   }
 }
 
@@ -880,11 +860,15 @@ void processHidAndMacroTask() {
 // ==============================
 void setup() {
   Serial.begin(115200);
+  delay(500);        // BOOTSEL直後のUSBシリアル安定化用
   Gamepad.begin();
-  delay(1000);
+  delay(500);        // HID初期化待機
   Serial.println("Booting Pico W Switch Pad...");
 
-  // ---- load /wifi.cfg and connect Wi-Fi if present ----
+  // よく伸びるバッファの事前確保（サイズは適当に調整）
+  serialLine.reserve(256);
+  gWifiLineBuffer.reserve(256);
+
   if (loadWifiConfig()) {
     if (!startWifiFromConfig()) {
       Serial.println("[WiFi] connect failed at boot -> offline mode");
@@ -895,12 +879,11 @@ void setup() {
 }
 
 void loop() {
-  // Task-style cooperative loop
-  processSerialInput();        // Serial 設定コマンド等
-  processWifiClientTask();     // Wi-Fi クライアント I/O
-  processHidAndMacroTask();    // Gamepad / Macro
+  processSerialInput();
+  processWifiClientTask();
+  processHidAndMacroTask();
 
-  yield();     // ★ 協調マルチタスク的お作法
-  delay(0);    // ★ 他タスクやWiFi処理にCPUを渡す
+  yield();
+  delay(0);
 }
 
