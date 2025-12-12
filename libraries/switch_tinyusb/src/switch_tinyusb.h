@@ -162,9 +162,9 @@ void NSGamepad::begin(void)
   this->usb_hid->setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
   USBDevice.setID(0x0f0d, 0x0092);
 
-  // USBDevice.setManufacturerDescriptor("GP2040-Compat");
-  // USBDevice.setProductDescriptor("Pico W Switch Gamepad");
-  // USBDevice.setSerialDescriptor("000000000001");
+  USBDevice.setManufacturerDescriptor("GP2040-Compat");
+  USBDevice.setProductDescriptor("Pico W Switch Gamepad");
+  USBDevice.setSerialDescriptor("000000000001");
   
   this->usb_hid->begin();
 
