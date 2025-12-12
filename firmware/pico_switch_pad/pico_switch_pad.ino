@@ -860,9 +860,8 @@ void processHidAndMacroTask() {
 // ==============================
 void setup() {
   Serial.begin(115200);
-  delay(500);        // BOOTSEL直後のUSBシリアル安定化用
   Gamepad.begin();
-  delay(500);        // HID初期化待機
+  delay(1000);        // HID初期化待機
   Serial.println("Booting Pico W Switch Pad...");
 
   // よく伸びるバッファの事前確保（サイズは適当に調整）
